@@ -61,13 +61,13 @@ class NNCFWrapperCustom(tf.keras.layers.Wrapper):
         expand_ops_relu = self.get_left_childs(g, expand_ops, 2, 'Relu6')
         project_bn = self.get_left_childs(g, project_ops, 1, 'FusedBatchNormV3')
         # First conv
-        first_conv = [op for op in g.get_operations() if 'predict/MobilenetV2/Conv/Conv2D' in op.name and 'conv' in op.type.lower()][0]
+        first_conv = [op for op in g.get_operations() if 'MobilenetV2/Conv/Conv2D' in op.name and 'conv' in op.type.lower()][0]
         first_conv_relu = self.get_left_childs(g, [first_conv], 2, 'Relu6')[0]
         # Tail
-        last_conv = [op for op in g.get_operations() if 'predict/MobilenetV2/Conv_1/Conv2D' in op.name and 'conv' in op.type.lower()][0]
+        last_conv = [op for op in g.get_operations() if 'MobilenetV2/Conv_1/Conv2D' in op.name and 'conv' in op.type.lower()][0]
         last_conv_relu = self.get_left_childs(g, [last_conv], 2, 'Relu6')[0]
         avg_pool = self.get_left_childs(g, [last_conv], 4, 'AvgPool')[0]
-        prediction_mul = self.get_left_childs(g, [last_conv], 6, 'Conv2D')[0]
+        prediction_mul = self.get_left_childs(g, [last_conv], 6, ['Conv2D', 'Mul'])[0]
         #
         # Create transformation
         #
@@ -130,7 +130,7 @@ class NNCFWrapperCustom(tf.keras.layers.Wrapper):
             # Add new op to layer
             if not self.ops_vars_created:
                 self.op_vars = []
-            enable_quantization = False
+            enable_quantization = True
             if enable_quantization:
                 new_vars = []
                 with concrete.graph.as_default() as g:
@@ -157,7 +157,7 @@ class NNCFWrapperCustom(tf.keras.layers.Wrapper):
                 # This is needed for correct export.
 
                 # Update captures
-                if tf.distribute.has_strategy():
+                if isinstance(tf.distribute.get_strategy(), tf.distribute.MirroredStrategy):
                     new_ops_vars = get_zero_replica_from_mirrored_vars(self.op_vars)
                 else:
                     new_ops_vars = self.op_vars
@@ -235,7 +235,10 @@ class NNCFWrapperCustom(tf.keras.layers.Wrapper):
 
             child = child[0]
             if op_type is not None:
-                assert child.type == op_type
+                if isinstance(op_type, list):
+                    assert child.type in op_type
+                else:
+                    assert child.type == op_type
 
             retval.append(child)
 
