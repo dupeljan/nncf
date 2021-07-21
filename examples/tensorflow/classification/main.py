@@ -32,7 +32,7 @@ from examples.tensorflow.common.callbacks import get_callbacks
 from examples.tensorflow.common.callbacks import get_progress_bar
 from examples.tensorflow.common.distributed import get_distribution_strategy
 from examples.tensorflow.common.logger import logger
-from examples.tensorflow.common.model_loader import get_model
+from examples.tensorflow.common.model_loader import get_model as get_model_old
 from examples.tensorflow.common.optimizer import build_optimizer
 from examples.tensorflow.common.sample_config import create_sample_config
 from examples.tensorflow.common.scheduler import build_scheduler
@@ -43,6 +43,22 @@ from examples.tensorflow.common.utils import print_args
 from examples.tensorflow.common.utils import serialize_config
 from examples.tensorflow.common.utils import serialize_cli_args
 from examples.tensorflow.common.utils import write_metrics
+from examples.tensorflow.classification.test_models import get_KerasLayer_model
+from examples.tensorflow.classification.test_models import get_model
+from examples.tensorflow.classification.test_models import ModelType
+
+# KerasLayer with NNCFWrapper 1 epoch
+# runs/MobileNetV2_imagenet2012/2021-07-21__14-22-44
+# Keras Layer pure 1 epoch
+# runs/MobileNetV2_imagenet2012/2021-07-21__14-53-04
+
+
+class DummyContextManager:
+    def __enter__(self):
+        pass
+
+    def __exit__(self, *args):
+        pass
 
 
 def get_argument_parser():
@@ -64,6 +80,11 @@ def get_argument_parser():
         help="Use pretrained models from the tf.keras.applications",
         action="store_true",
     )
+    parser.add_argument(
+        "--model_type",
+        choices=[ModelType.KerasLayer, ModelType.FuncModel, ModelType.SubClassModel],
+        default=ModelType.KerasLayer,
+        help="Type of mobilenetV2 model which should be quantized.")
     return parser
 
 
@@ -152,11 +173,17 @@ def run(config):
     if config.metrics_dump is not None:
         write_metrics(0, config.metrics_dump)
 
-    model_fn, model_params = get_model(config.model,
+    model_fn, model_params = get_model_old(config.model,
                                        input_shape=config.get('input_info', {}).get('sample_size', None),
                                        num_classes=config.get('num_classes', get_num_classes(config.dataset)),
                                        pretrained=config.get('pretrained', False),
                                        weights=config.get('weights', None))
+
+    if config.model_type == ModelType.KerasLayer:
+        args = None
+        #args = get_KerasLayer_model()
+    else:
+        args = None
 
     builders = get_dataset_builders(config, strategy.num_replicas_in_sync)
     datasets = [builder.build() for builder in builders]
@@ -188,8 +215,18 @@ def run(config):
     if resume_training:
         compression_state = load_compression_state(config.ckpt_path)
 
-    with TFOriginalModelManager(model_fn, **model_params) as model:
+    with DummyContextManager():
         with strategy.scope():
+            if not args:
+                args = get_model(config.model_type)
+
+            from op_insertion import NNCFWrapperCustom
+            model = tf.keras.Sequential([
+                tf.keras.layers.Input(shape=(224, 224, 3)),
+                #NNCFWrapperCustom(*args),
+                args[0]['layer'],#NNCFWrapperCustom(*args),
+                tf.keras.layers.Activation('softmax')
+            ])
             compression_ctrl, compress_model = create_compressed_model(model, nncf_config, compression_state)
             compression_callbacks = create_compression_callbacks(compression_ctrl, log_dir=config.log_dir)
 
@@ -329,6 +366,7 @@ def export(config):
 def main(argv):
     parser = get_argument_parser()
     config = get_config_from_argv(argv, parser)
+    config['eager_mode'] = True
     print_args(config)
 
     serialize_config(config.nncf_config, config.log_dir)
