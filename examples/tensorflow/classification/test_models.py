@@ -55,7 +55,7 @@ def get_KerasLayer_model():
 
         keras_layer = hub.KerasLayer("https://tfhub.dev/google/imagenet/mobilenet_v2_100_224/classification/5",
                                      trainable=trainable, arguments=dict(batch_norm_momentum=0.997))
-        tf_f = tf.function(keras_layer.call)
+        tf_f = tf.function(lambda x: keras_layer.call(x, training=trainable))
         concrete = tf_f.get_concrete_function(*[tf.TensorSpec((None, 224, 224, 3), tf.float32, name='input')])
         optimized_gd = _run_inline_graph_optimization(concrete, False, False)
         retval.append({

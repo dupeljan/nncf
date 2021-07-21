@@ -217,43 +217,67 @@ def run(config):
 
     with DummyContextManager():
         with strategy.scope():
-            if not args:
-                args = get_model(config.model_type)
+            if True:#not args:
+                keras_layer = get_model(config.model_type)[0]['layer']
 
             from op_insertion import NNCFWrapperCustom
-            model = tf.keras.Sequential([
+            model_kl = tf.keras.Sequential([
                 tf.keras.layers.Input(shape=(224, 224, 3)),
-                NNCFWrapperCustom(*args),
-                #args[0]['layer'],
+                keras_layer,
                 tf.keras.layers.Activation('softmax')
             ])
-            compression_ctrl, compress_model = create_compressed_model(model, nncf_config, compression_state)
-            compression_callbacks = create_compression_callbacks(compression_ctrl, log_dir=config.log_dir)
 
-            scheduler = build_scheduler(
-                config=config,
-                steps_per_epoch=train_steps)
-            optimizer = build_optimizer(
-                config=config,
-                scheduler=scheduler)
+            model_custom = tf.keras.Sequential([
+                tf.keras.layers.Input(shape=(224, 224, 3)),
+                NNCFWrapperCustom(*args),
+                tf.keras.layers.Activation('softmax')
+            ])
 
-            loss_obj = tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.1)
 
-            compress_model.add_loss(compression_ctrl.loss)
+            grads_list = []
+            pred_list = []
+            for model in [model_kl, model_custom]:
+                compression_ctrl, compress_model = create_compressed_model(model, nncf_config, compression_state)
+                compression_callbacks = create_compression_callbacks(compression_ctrl, log_dir=config.log_dir)
 
-            metrics = [
-                tf.keras.metrics.CategoricalAccuracy(name='acc@1'),
-                tf.keras.metrics.TopKCategoricalAccuracy(k=5, name='acc@5'),
-                tfa.metrics.MeanMetricWrapper(loss_obj, name='ce_loss'),
-                tfa.metrics.MeanMetricWrapper(compression_ctrl.loss, name='cr_loss')
-            ]
+                scheduler = build_scheduler(
+                    config=config,
+                    steps_per_epoch=train_steps)
+                optimizer = build_optimizer(
+                    config=config,
+                    scheduler=scheduler)
 
-            compress_model.compile(optimizer=optimizer,
-                                   loss=loss_obj,
-                                   metrics=metrics,
-                                   run_eagerly=config.get('eager_mode', False))
+                loss_obj = tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.1)
 
-            compress_model.summary()
+                compress_model.add_loss(compression_ctrl.loss)
+
+                metrics = [
+                    tf.keras.metrics.CategoricalAccuracy(name='acc@1'),
+                    tf.keras.metrics.TopKCategoricalAccuracy(k=5, name='acc@5'),
+                    tfa.metrics.MeanMetricWrapper(loss_obj, name='ce_loss'),
+                    tfa.metrics.MeanMetricWrapper(compression_ctrl.loss, name='cr_loss')
+                ]
+
+                compress_model.compile(optimizer=optimizer,
+                                       loss=loss_obj,
+                                       metrics=metrics,
+                                       run_eagerly=config.get('eager_mode', False))
+
+                compress_model.summary()
+
+               # x = tf.ones((1, 224, 224, 3))
+               # y = tf.Variable([1000*[0] + [1]], tf.int32)
+               # with tf.GradientTape() as tape:
+               #     y_pred = model(x, training=True)
+               #     pred_list.append(y_pred)
+               #     loss = model.compiled_loss(y, y_pred)
+
+               # grads = tape.gradient(loss, model.trainable_weights)
+               # grads_list.append({w.name: g for g, w in zip(grads, model.trainable_weights)})
+            #kl_grads = {k.split(':')[0]: v for k, v in grads_list[0].items()}
+            #custom_grads = {'_'.join('/'.join(k.split('/')[1:]).split('_')[:-1]): v for k, v in grads_list[1].items()}
+            k = 'MobilenetV2/Conv/BatchNorm/beta'
+            model = model_custom
 
             checkpoint = tf.train.Checkpoint(model=compress_model,
                                              compression_state=TFCompressionState(compression_ctrl))
