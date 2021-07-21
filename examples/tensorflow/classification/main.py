@@ -155,8 +155,8 @@ def resume_from_checkpoint(checkpoint, ckpt_path, steps_per_epoch):
     if load_checkpoint(checkpoint, ckpt_path) == 0:
         return 0
 
-    initial_step = checkpoint.model.optimizer.iterations.numpy()
-    initial_epoch = initial_step // steps_per_epoch
+    initial_step = 0#checkpoint.model.optimizer.iterations.numpy()
+    initial_epoch = 0#initial_step // steps_per_epoch
 
     logger.info('Resuming from epoch %d', initial_epoch)
     return initial_epoch
