@@ -73,27 +73,27 @@ class NNCFWrapperCustom(tf.keras.layers.Wrapper):
         #
         transformations = []
         # Transformations for blocks
-        #transformations.extend([(op, InsertionPoint.WEIGHTS) for op in depthwise_conv])
-        #transformations.extend([(op, InsertionPoint.WEIGHTS) for op in project_ops])
+        transformations.extend([(op, InsertionPoint.WEIGHTS) for op in depthwise_conv])
+        transformations.extend([(op, InsertionPoint.WEIGHTS) for op in project_ops])
         transformations.extend([(op, InsertionPoint.WEIGHTS) for op in expand_ops])
 
-        #transformations.extend([(op, InsertionPoint.AFTER_LAYER) for op in depthwise_conv_relu])
-        #transformations.extend([(op, InsertionPoint.AFTER_LAYER) for op in project_bn])
+        transformations.extend([(op, InsertionPoint.AFTER_LAYER) for op in depthwise_conv_relu])
+        transformations.extend([(op, InsertionPoint.AFTER_LAYER) for op in project_bn])
         transformations.extend([(op, InsertionPoint.AFTER_LAYER) for op in expand_ops_relu])
-        #transformations.extend([(op, InsertionPoint.AFTER_LAYER) for op in add_ops])
+        transformations.extend([(op, InsertionPoint.AFTER_LAYER) for op in add_ops])
         # Transformations for first conv
         # FQ on inputs
-        #transformations.append((first_conv, InsertionPoint.BEFORE_LAYER))
-        ## FQ on first conv weights
-        #transformations.append((first_conv, InsertionPoint.WEIGHTS))
-        ## FQ after first conv relu
-        #transformations.append((first_conv_relu, InsertionPoint.AFTER_LAYER))
-        ## Transformation for net tail
-        #transformations.append((last_conv, InsertionPoint.WEIGHTS))
-        #transformations.append((last_conv_relu, InsertionPoint.AFTER_LAYER))
-        #transformations.append((avg_pool, InsertionPoint.AFTER_LAYER))
-        #transformations.append((prediction_mul, InsertionPoint.WEIGHTS))
-        #assert len(transformations) == 117
+        transformations.append((first_conv, InsertionPoint.BEFORE_LAYER))
+        # FQ on first conv weights
+        transformations.append((first_conv, InsertionPoint.WEIGHTS))
+        # FQ after first conv relu
+        transformations.append((first_conv_relu, InsertionPoint.AFTER_LAYER))
+        # Transformation for net tail
+        transformations.append((last_conv, InsertionPoint.WEIGHTS))
+        transformations.append((last_conv_relu, InsertionPoint.AFTER_LAYER))
+        transformations.append((avg_pool, InsertionPoint.AFTER_LAYER))
+        transformations.append((prediction_mul, InsertionPoint.WEIGHTS))
+        assert len(transformations) == 117
 
         return transformations
 
@@ -249,7 +249,7 @@ class NNCFWrapperCustom(tf.keras.layers.Wrapper):
             retval = []
             for var in vars:
                 mirrored_var = tf.Variable(var.numpy(),
-                                           trainable=var.trainable,
+                                           trainable=False,#var.trainable,
                                            dtype=var.dtype,
                                            name=var.name.split(':')[0] + '_mirrored')
                 retval.append(mirrored_var)
