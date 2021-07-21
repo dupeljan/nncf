@@ -180,8 +180,8 @@ def run(config):
                                        weights=config.get('weights', None))
 
     if config.model_type == ModelType.KerasLayer:
-        args = None
-        #args = get_KerasLayer_model()
+        #args = None
+        args = get_KerasLayer_model()
     else:
         args = None
 
@@ -223,8 +223,8 @@ def run(config):
             from op_insertion import NNCFWrapperCustom
             model = tf.keras.Sequential([
                 tf.keras.layers.Input(shape=(224, 224, 3)),
-                #NNCFWrapperCustom(*args),
-                args[0]['layer'],#NNCFWrapperCustom(*args),
+                NNCFWrapperCustom(*args),
+                #args[0]['layer'],
                 tf.keras.layers.Activation('softmax')
             ])
             compression_ctrl, compress_model = create_compressed_model(model, nncf_config, compression_state)
@@ -366,7 +366,7 @@ def export(config):
 def main(argv):
     parser = get_argument_parser()
     config = get_config_from_argv(argv, parser)
-    config['eager_mode'] = True
+    #config['eager_mode'] = True
     print_args(config)
 
     serialize_config(config.nncf_config, config.log_dir)

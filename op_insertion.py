@@ -183,8 +183,7 @@ class NNCFWrapperCustom(tf.keras.layers.Wrapper):
 
     def call(self, inputs, training=None):
         model_obj = self.trainable_model if training else self.eval_model
-        replica_context = None
-        if tf.distribute.has_strategy():
+        if isinstance(tf.distribute.get_strategy(), tf.distribute.MirroredStrategy):
             replica_context = tf.distribute.get_replica_context()
             if replica_context is not None:
                 # Map correspondent replica of MirroredVariable to replica concrete function
@@ -204,12 +203,17 @@ class NNCFWrapperCustom(tf.keras.layers.Wrapper):
 
                     new_variables.append(var._get_replica(idx))
                     new_captured.append((var._get_replica(idx).handle, input_tensor))
-
-        if not tf.distribute.has_strategy() or not replica_context:
-            # If there is no distribute strategy or in compile time
-            # don't change vars
-            new_variables = model_obj.fn_train.graph.variables
-            new_captured = model_obj.fn_train.graph.captures
+            else:
+                # On compile time don't change vars
+                new_variables = model_obj.fn_train.graph.variables
+                new_captured = model_obj.fn_train.graph.captures
+        else: # not distributed mode
+            new_variables = []
+            new_captured = []
+            for var, input_tensor in zip(model_obj.mirrored_variables + self.op_vars,
+                                         model_obj.fn_train.inputs[1:]):
+                new_variables.append(var)
+                new_captured.append((var.handle, input_tensor))
 
         fn_train = make_new_func(model_obj.fn_train.graph.as_graph_def(),
                                  new_captured,

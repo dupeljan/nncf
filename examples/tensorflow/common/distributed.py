@@ -16,7 +16,7 @@ import tensorflow as tf
 
 
 def get_distribution_strategy(config):
-    if config.get('cpu_only', True):
+    if config.get('cpu_only', False):
         os.environ['CUDA_VISIBLE_DEVICES'] = ''
         return tf.distribute.OneDeviceStrategy('device:CPU:0')
 

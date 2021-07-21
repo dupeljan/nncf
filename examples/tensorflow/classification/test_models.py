@@ -51,7 +51,7 @@ def get_KerasLayer_model():
     """
     retval = []
     for trainable in [True, False]:
-       # assert not tf.distribute.has_strategy(), 'Can\'t modify KerasLayer graph created in cross replica mode'
+        #assert not tf.distribute.has_strategy(), 'Can\'t modify KerasLayer graph created in cross replica mode'
 
         keras_layer = hub.KerasLayer("https://tfhub.dev/google/imagenet/mobilenet_v2_100_224/classification/5",
                                      trainable=trainable, arguments=dict(batch_norm_momentum=0.997))
