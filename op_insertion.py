@@ -204,7 +204,6 @@ class NNCFWrapperCustom(tf.keras.layers.Wrapper):
             tf.io.write_graph(concrete.graph, '/tmp', 'mobilenetv2_sub_with_conv.pb')
 
     def call(self, inputs, training=None):
-        training = True
         model_obj = self.trainable_model if training else self.eval_model
         if isinstance(tf.distribute.get_strategy(), tf.distribute.MirroredStrategy):
             replica_context = tf.distribute.get_replica_context()
