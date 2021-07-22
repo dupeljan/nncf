@@ -306,8 +306,8 @@ def run(config):
         logger.info('training...')
         compress_model.fit(
             train_dataset,
-            epochs=train_epochs,
-            steps_per_epoch=train_steps,
+            epochs=1,#train_epochs,
+            steps_per_epoch=3,#train_steps,
             initial_epoch=initial_epoch,
             callbacks=callbacks,
             **validation_kwargs)

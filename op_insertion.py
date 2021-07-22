@@ -1,4 +1,5 @@
 import tensorflow as tf
+import numpy as np
 
 from typing import List
 from tensorflow.python.framework import importer
@@ -21,6 +22,12 @@ class InsertionPoint(object):
     BEFORE_LAYER = 'before'
 
 
+class QuantizationSetup(object):
+    def __init__(self, signed=None, should_init=None):
+        self.signed = signed
+        self.init_value = should_init
+
+
 class NNCFCallableGraph(object):
     pass
 
@@ -33,6 +40,7 @@ class NNCFWrapperCustom(tf.keras.layers.Wrapper):
         self.eval_model = NNCFCallableGraph()
         self.mirrored_vars_created = False
         self.ops_vars_created = False
+        self.initial_model_weights = None
         if isinstance(trainable_model, dict):
             self.model_type = ModelType.KerasLayer
 
@@ -73,26 +81,26 @@ class NNCFWrapperCustom(tf.keras.layers.Wrapper):
         #
         transformations = []
         # Transformations for blocks
-        transformations.extend([(op, InsertionPoint.WEIGHTS) for op in depthwise_conv])
-        transformations.extend([(op, InsertionPoint.WEIGHTS) for op in project_ops])
-        transformations.extend([(op, InsertionPoint.WEIGHTS) for op in expand_ops])
+        transformations.extend([(op, InsertionPoint.WEIGHTS, QuantizationSetup(signed=True)) for op in depthwise_conv])
+        transformations.extend([(op, InsertionPoint.WEIGHTS, QuantizationSetup(signed=True)) for op in project_ops])
+        transformations.extend([(op, InsertionPoint.WEIGHTS, QuantizationSetup(signed=True)) for op in expand_ops])
 
-        transformations.extend([(op, InsertionPoint.AFTER_LAYER) for op in depthwise_conv_relu])
-        transformations.extend([(op, InsertionPoint.AFTER_LAYER) for op in project_bn])
-        transformations.extend([(op, InsertionPoint.AFTER_LAYER) for op in expand_ops_relu])
-        transformations.extend([(op, InsertionPoint.AFTER_LAYER) for op in add_ops])
+        transformations.extend([(op, InsertionPoint.AFTER_LAYER, QuantizationSetup(signed=False)) for op in depthwise_conv_relu])
+        transformations.extend([(op, InsertionPoint.AFTER_LAYER, QuantizationSetup(signed=True)) for op in project_bn])
+        transformations.extend([(op, InsertionPoint.AFTER_LAYER, QuantizationSetup(signed=False)) for op in expand_ops_relu])
+        transformations.extend([(op, InsertionPoint.AFTER_LAYER, QuantizationSetup(signed=True)) for op in add_ops])
         # Transformations for first conv
         # FQ on inputs
-        transformations.append((first_conv, InsertionPoint.BEFORE_LAYER))
+        transformations.append((first_conv, InsertionPoint.BEFORE_LAYER, QuantizationSetup(signed=True)))
         # FQ on first conv weights
-        transformations.append((first_conv, InsertionPoint.WEIGHTS))
+        transformations.append((first_conv, InsertionPoint.WEIGHTS, QuantizationSetup(signed=True)))
         # FQ after first conv relu
-        transformations.append((first_conv_relu, InsertionPoint.AFTER_LAYER))
+        transformations.append((first_conv_relu, InsertionPoint.AFTER_LAYER, QuantizationSetup(signed=False)))
         # Transformation for net tail
-        transformations.append((last_conv, InsertionPoint.WEIGHTS))
-        transformations.append((last_conv_relu, InsertionPoint.AFTER_LAYER))
-        transformations.append((avg_pool, InsertionPoint.AFTER_LAYER))
-        transformations.append((prediction_mul, InsertionPoint.WEIGHTS))
+        transformations.append((last_conv, InsertionPoint.WEIGHTS, QuantizationSetup(signed=True)))
+        transformations.append((last_conv_relu, InsertionPoint.AFTER_LAYER, QuantizationSetup(signed=False)))
+        transformations.append((avg_pool, InsertionPoint.AFTER_LAYER, QuantizationSetup(signed=False)))
+        transformations.append((prediction_mul, InsertionPoint.WEIGHTS, QuantizationSetup(signed=True)))
         assert len(transformations) == 117
 
         return transformations
@@ -105,6 +113,7 @@ class NNCFWrapperCustom(tf.keras.layers.Wrapper):
 
                 sorted_vars = get_sorted_on_captured_vars(concrete)
                 model.mirrored_variables = model.orig_model.variables
+
             else:
                 concrete = make_new_func(model.graph_def,
                                          model.concrete.graph.captures,
@@ -114,6 +123,9 @@ class NNCFWrapperCustom(tf.keras.layers.Wrapper):
 
                 sorted_vars = get_sorted_on_captured_vars(concrete)
                 model.mirrored_variables = self.create_mirrored_variables(sorted_vars)
+
+            if not self.initial_model_weights:
+                self.initial_model_weights = self.get_numpy_weights_list(sorted_vars)
 
             # Save mapping for concrete per replica inputs
             model.bn_weights_names = set(['/'.join(v.name.split('/')[:-1]) for v in concrete.variables if 'replica' in v.name.lower()])
@@ -136,13 +148,23 @@ class NNCFWrapperCustom(tf.keras.layers.Wrapper):
                 with concrete.graph.as_default() as g:
                     transformations = self.get_keras_layer_mobilenet_v2_fq_placing_simular_to_nncf2_0(g)
                     # Insert given transformations
-                    for op, insertion_point in transformations:
+                    for op, insertion_point, setup in transformations:
+                        def fq_creation(input_tensor, name, init_value=6):
+                            return create_fq_with_weights(input_tensor=input_tensor,
+                                                          name=name,
+                                                          signed=setup.signed,
+                                                          init_value=init_value)
+
                         if insertion_point == InsertionPoint.AFTER_LAYER:
-                            new_vars.append(insert_op_after(g, op, 0, create_fq_with_weights, op.name))
+                            new_vars.append(insert_op_after(g, op, 0, fq_creation, op.name))
                         elif insertion_point == InsertionPoint.BEFORE_LAYER:
-                            new_vars.append(insert_op_before(g, op, 0, create_fq_with_weights, f'{op.name}_before_layer'))
+                            new_vars.append(insert_op_before(g, op, 0, fq_creation, f'{op.name}_before_layer'))
                         elif insertion_point == InsertionPoint.WEIGHTS:
-                            new_vars.append(insert_op_before(g, op, 1, create_fq_with_weights, op.name))
+                            min_val, max_val = self.get_min_max_op_weights(g, op, concrete.inputs,
+                                                                           self.initial_model_weights)
+                            scale = max(abs(min_val), abs(max_val))
+                            fq_creation_initialized = lambda input_tensor, name: fq_creation(input_tensor, name, scale)
+                            new_vars.append(insert_op_before(g, op, 1, fq_creation_initialized, op.name))
                         else:
                             raise RuntimeError('Wrong insertion point in quantization algo')
 
@@ -182,6 +204,7 @@ class NNCFWrapperCustom(tf.keras.layers.Wrapper):
             tf.io.write_graph(concrete.graph, '/tmp', 'mobilenetv2_sub_with_conv.pb')
 
     def call(self, inputs, training=None):
+        training = True
         model_obj = self.trainable_model if training else self.eval_model
         if isinstance(tf.distribute.get_strategy(), tf.distribute.MirroredStrategy):
             replica_context = tf.distribute.get_replica_context()
@@ -223,6 +246,19 @@ class NNCFWrapperCustom(tf.keras.layers.Wrapper):
 
         return fn_train(inputs)
 
+    def get_min_max_op_weights(self, graph, op, placeholders, np_vars):
+        try:
+            placeholder = self.get_op_weights_placeholder(graph, op)
+        except IndexError:
+            print(f'CANT MAP {op.name}')
+            return -6, 6
+
+        placeholders_names = [p.name.split(':')[0] for p in placeholders[1:]]
+        idx = placeholders_names.index(placeholder.name)
+        weight = np_vars[idx][0]
+        print(f'map {op.name} -----> {np_vars[idx][1]}')
+        return np.min(weight), np.max(weight)
+
     def get_left_childs(self, graph, ops: List, depth: int, op_type: str = None):
         """Get child for each op given by ops list in given depth"""
         retval = []
@@ -244,6 +280,14 @@ class NNCFWrapperCustom(tf.keras.layers.Wrapper):
 
         return retval
 
+    @staticmethod
+    def get_op_weights_placeholder(graph, op):
+        placeholder = op
+        while placeholder.type != 'Placeholder':
+            placeholder = OperationUtils.get_parent_ops(graph, placeholder)[-1]
+
+        return placeholder
+
     def create_mirrored_variables(self, vars):
         if not self.mirrored_vars_created:
             retval = []
@@ -259,6 +303,15 @@ class NNCFWrapperCustom(tf.keras.layers.Wrapper):
             retval = self.mirrored_vars_cache
 
         return retval
+
+    @staticmethod
+    def get_numpy_weights_list(vars):
+        #retval = {}
+        #for var in vars:
+        #    retval[var.name] = var.numpy()
+
+        #return retval
+        return [(var.numpy(), var.name) for var in vars]
 
 
 def get_zero_replica_from_mirrored_vars(vars):
@@ -347,16 +400,18 @@ def insert_op_after(graph, target_parent, output_index, node_creation_fn, name):
     return node_weights
 
 
-def create_fq_with_weights(input_tensor, name):
+def create_fq_with_weights(input_tensor, name, signed, init_value):
     """Should be called in graph context"""
     with variable_scope.variable_scope('new_node'):
         scale = variable_scope.get_variable(
             f'scale_{name}',
             shape=(),
             dtype=tf.float32,
-            initializer=tf.keras.initializers.Constant(6),#init_ops.constant_initializer(1),
+            initializer=tf.keras.initializers.Constant(init_value),#init_ops.constant_initializer(1),
             trainable=True)
-        output_tensor = tf.quantization.fake_quant_with_min_max_vars(input_tensor, -scale, scale)
+
+        min = -scale if signed else 0.
+        output_tensor = tf.quantization.fake_quant_with_min_max_vars(input_tensor, min, scale)
     return output_tensor, scale
 
 
@@ -403,22 +458,24 @@ def my_function_from_graph_def(graph_def, inputs, outputs, ref_captures):
 class OperationUtils:
     @staticmethod
     def get_parent_ops(graph, target_op):
-        retval = []
+        retval = {}
         target_op_inputs = [x.name for x in target_op.inputs]
         for op in graph.get_operations():
-            if any([i in [x.name for x in op.outputs] for i in target_op_inputs]):
-                retval.append(op)
-                if len(retval) == len(target_op.inputs):
-                    break
-        return retval
+            for idx, i in enumerate(target_op_inputs):
+                if i in [x.name for x in op.outputs]:
+                    retval[idx] = op
+            if len(retval) == len(target_op.inputs):
+                break
+        return [retval[i] for i in range(len(retval))]
 
     @staticmethod
     def get_children_ops(graph, target_op):
-        retval = []
+        retval = {}
         target_op_outputs = [x.name for x in target_op.outputs]
         for op in graph.get_operations():
-            if any([out in [x.name for x in op.inputs] for out in target_op_outputs]):
-                retval.append(op)
-                if len(retval) == len(target_op.outputs):
-                    break
-        return retval
+            for idx, out in enumerate(target_op_outputs):
+                if out in [x.name for x in op.inputs]:
+                    retval[idx] = op
+            if len(retval) == len(target_op.outputs):
+                break
+        return [retval[i] for i in range(len(retval))]
