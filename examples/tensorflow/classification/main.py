@@ -11,12 +11,14 @@
  limitations under the License.
 """
 
+import os
 import sys
 import os.path as osp
-from pathlib import Path
-
 import tensorflow as tf
 import tensorflow_addons as tfa
+
+from pathlib import Path
+from tensorflow.python.framework.convert_to_constants import convert_variables_to_constants_v2
 
 from nncf.config.utils import is_accuracy_aware_training
 from nncf.tensorflow.helpers.model_creation import create_compressed_model
@@ -25,7 +27,6 @@ from nncf.tensorflow.helpers.model_manager import TFOriginalModelManager
 from nncf.tensorflow.initialization import register_default_init_args
 from nncf.tensorflow.utils.state import TFCompressionState
 from nncf.tensorflow.utils.state import TFCompressionStateLoader
-
 from examples.tensorflow.classification.datasets.builder import DatasetBuilder
 from examples.tensorflow.common.argparser import get_common_argument_parser
 from examples.tensorflow.common.callbacks import get_callbacks
@@ -51,6 +52,21 @@ from examples.tensorflow.classification.test_models import ModelType
 # runs/MobileNetV2_imagenet2012/2021-07-21__14-22-44
 # Keras Layer pure 1 epoch
 # runs/MobileNetV2_imagenet2012/2021-07-21__14-53-04
+
+
+def keras_model_to_frozen_graph(model):
+    input_signature = []
+    for item in model.inputs:
+        input_signature.append(tf.TensorSpec(item.shape, item.dtype))
+    concrete_function = tf.function(model).get_concrete_function(input_signature)
+    frozen_func = convert_variables_to_constants_v2(concrete_function, lower_control_flow=False)
+    return frozen_func.graph.as_graph_def(add_shapes=True)
+
+
+def save_model_as_frozen_graph(model, save_path, as_text=False):
+    frozen_graph = keras_model_to_frozen_graph(model)
+    save_dir, name = os.path.split(save_path)
+    tf.io.write_graph(frozen_graph, save_dir, name, as_text=as_text)
 
 
 class DummyContextManager:
@@ -308,9 +324,10 @@ def run(config):
         write_metrics(results[1], config.metrics_dump)
 
     if 'export' in config.mode:
-        save_path, save_format = get_saving_parameters(config)
-        compression_ctrl.export_model(save_path, save_format)
-        logger.info('Saved to {}'.format(save_path))
+        save_model_as_frozen_graph(compress_model, config.to_frozen_graph)
+        #save_path, save_format = get_saving_parameters(config)
+        #compression_ctrl.export_model(save_path, save_format)
+        #logger.info('Saved to {}'.format(save_path))
 
 
 def export(config):
