@@ -313,6 +313,20 @@ def run(config):
             **validation_kwargs)
 
     logger.info('evaluation...')
+    count_of_adapt = 3
+    for _ in range(count_of_adapt):
+        compress_model.layers[0].training_lock = True
+        results = compress_model.evaluate(
+            validation_dataset,
+            steps=validation_steps,
+            callbacks=[get_progress_bar(
+                stateful_metrics=['loss'] + [metric.name for metric in metrics])],
+            verbose=1)
+
+    compress_model.compile(loss=loss_obj,
+                           metrics=metrics)
+
+    compress_model.layers[0].training_lock = False
     results = compress_model.evaluate(
         validation_dataset,
         steps=validation_steps,
