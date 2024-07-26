@@ -10,7 +10,6 @@
 # limitations under the License.
 from typing import Dict, Iterable, List, Optional, Tuple
 
-import numpy as np
 import openvino as ov
 from openvino.runtime import opset13 as opset
 
@@ -33,6 +32,7 @@ from nncf.parameters import CompressWeightsMode
 from nncf.quantization.algorithms.weight_compression.awq_patterns import get_awq_patterns
 from nncf.quantization.algorithms.weight_compression.backend import AWQAlgoBackend
 from nncf.quantization.algorithms.weight_compression.backend import WeightCompressionAlgoBackend
+from nncf.quantization.algorithms.weight_compression.config import WeightCompressionConfig
 from nncf.quantization.algorithms.weight_compression.config import WeightCompressionParameters
 from nncf.quantization.algorithms.weight_compression.weight_lowering import compress_weight
 from nncf.tensor import Tensor
@@ -113,7 +113,12 @@ class OVWeightCompressionAlgoBackend(WeightCompressionAlgoBackend):
         const_port = node_with_const.input(weight_port_id)
         const_node = node_with_const.input_value(weight_port_id).get_node()
 
-        new_const_node = ov.runtime.op.Constant(weight.data, shared_memory=True)
+        shared_memory = True
+        if const_node.get_element_type() == ov.Type.bf16:
+            # Shared memory does not work for BF16 precision
+            shared_memory = False
+
+        new_const_node = ov.runtime.op.Constant(weight.data, shared_memory=shared_memory)
         new_const_node.set_friendly_name(const_node.get_friendly_name())
         const_port.replace_source_output(new_const_node.output(0))
 
@@ -136,8 +141,12 @@ class OVWeightCompressionAlgoBackend(WeightCompressionAlgoBackend):
     ) -> ov.Model:
         for wc_params in weight_compression_parameters:
             compression_config = wc_params.compression_config
+            scale_dtype = ov.Type.f16
             if compression_config.mode == CompressWeightsMode.NF4:
                 compression_dtype = ov.Type.nf4
+            elif compression_config.mode == CompressWeightsMode.E2M1:
+                compression_dtype = ov.Type.f4e2m1
+                scale_dtype = ov.Type.f8e8m0
             elif compression_config.mode == CompressWeightsMode.INT4_SYM:
                 compression_dtype = ov.Type.i4
             elif compression_config.mode == CompressWeightsMode.INT4_ASYM:
@@ -162,7 +171,7 @@ class OVWeightCompressionAlgoBackend(WeightCompressionAlgoBackend):
                         should_add_convert_node = True
                         break
 
-            weight = Tensor(get_const_value(const_node, np.float32 if const_dtype == ov.Type.bf16 else None))
+            weight = Tensor(get_const_value(const_node))
             original_shape = weight.shape
             compressed_weight = compress_weight(
                 weight,
@@ -188,8 +197,11 @@ class OVWeightCompressionAlgoBackend(WeightCompressionAlgoBackend):
                 )
 
             scale_const = opset.constant(
-                compressed_weight.scale.data, dtype=ov.Type.f16, name=f"{const_node_name}/scale"
+                compressed_weight.scale.data, dtype=scale_dtype, name=f"{const_node_name}/scale"
             )
+            if scale_dtype != ov.Type.f16:
+                scale_const = opset.convert(scale_const, ov.Type.f16)
+
             mul = opset.multiply(
                 converted_const,
                 scale_const,
@@ -220,11 +232,9 @@ class OVWeightCompressionAlgoBackend(WeightCompressionAlgoBackend):
         dump_parameters(model, parameters, algo_name, path)
 
     @staticmethod
-    def get_compress_decompress_pipeline(
-        weight_compression_parameter: WeightCompressionParameters, w_shape, s_shape, z_p_shape=None
-    ):
+    def get_compress_decompress_pipeline(config: WeightCompressionConfig, w_shape, s_shape, z_p_shape=None):
         parameters, clamp = OVWeightCompressionAlgoBackend.get_compress_pipeline(
-            weight_compression_parameter, w_shape, s_shape, z_p_shape, True
+            config, w_shape, s_shape, z_p_shape, True
         )
 
         if len(parameters) == 3:
@@ -236,21 +246,19 @@ class OVWeightCompressionAlgoBackend(WeightCompressionAlgoBackend):
 
         model = ov.Model([result], parameters)
 
-        compiled_model = ov.compile_model(model)
+        compiled_model = ov.compile_model(model, device_name="CPU")
 
         return lambda parameters: compiled_model(parameters)[0]
 
     @staticmethod
-    def get_compress_pipeline(
-        weight_compression_parameter: WeightCompressionParameters, w_shape, s_shape, z_p_shape=None, return_nodes=False
-    ):
-        config = weight_compression_parameter.compression_config
+    def get_compress_pipeline(config: WeightCompressionConfig, w_shape, s_shape, z_p_shape=None, return_nodes=False):
         mode = config.mode
         assert mode in [CompressWeightsMode.INT4_SYM, CompressWeightsMode.INT4_ASYM]
         num_bits = config.num_bits
 
-        level_low = 0
-        level_high = 2**num_bits - 1
+        asym_quant = mode in [CompressWeightsMode.INT4_ASYM]
+        level_low = 0 if asym_quant else -(2 ** (num_bits - 1))
+        level_high = 2**num_bits - 1 if asym_quant else 2 ** (num_bits - 1) - 1
 
         w = opset.parameter(w_shape, name="w")
         s = opset.parameter(s_shape, name="s")
@@ -268,7 +276,7 @@ class OVWeightCompressionAlgoBackend(WeightCompressionAlgoBackend):
 
         model = ov.Model([result], parameters)
 
-        compiled_model = ov.compile_model(model)
+        compiled_model = ov.compile_model(model, device_name="CPU")
 
         return lambda parameters: compiled_model(parameters)[0]
 
